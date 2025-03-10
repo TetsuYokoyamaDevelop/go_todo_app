@@ -1,0 +1,22 @@
+# バイナリファイル（コンパイルされた実行ファイル）
+/bin/
+/obj/
+*.exe
+*.out
+*.o
+
+# 一時ファイル・キャッシュ
+*.log
+*.tmp
+*.swp
+*.swo
+
+# 依存関係管理（go modules）
+/vendor/
+go.sum
+
+# IDE やエディタの設定ファイル
+.vscode/
+.idea/
+.DS_Store
+.history
