@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -18,6 +19,8 @@ type Todo struct {
 	Title     string     `json:"title"`
 	Completed bool       `json:"completed"`
 	DueDate   *time.Time `json:"due_date" gorm:"default:null"`
+	UserID    uint       `json:"user_id"`           // Userへの外部キー
+	User      User       `gorm:"foreignKey:UserID"` // Userとの関連
 }
 
 type User struct {
@@ -69,7 +72,34 @@ func createTodo(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	db.Create(&newTodo)
+
+	// JWTトークンからユーザー情報を取得
+	userEmail, exists := c.Get("userEmail")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", userEmail).First(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	newTodo.UserID = user.ID
+
+	// Todoを作成
+	if err := db.Create(&newTodo).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating TODO"})
+		return
+	}
+
+	// 関連するUser情報をロード
+	if err := db.Preload("User").First(&newTodo, newTodo.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error loading user data"})
+		return
+	}
+
 	c.JSON(http.StatusCreated, newTodo)
 }
 
@@ -157,17 +187,78 @@ func login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": tokenString})
 }
 
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Authorizationヘッダーからトークンを取得
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is required"})
+			c.Abort()
+			return
+		}
+
+		// "Bearer "を取り除く
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// JWT_SECRETを取得
+		jwtSecret := os.Getenv("JWT_SECRET")
+		if jwtSecret == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT Secret not found"})
+			c.Abort()
+			return
+		}
+
+		// トークンを検証
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return []byte(jwtSecret), nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+			return
+		}
+
+		// トークンが有効であれば、ユーザーのメールをコンテキストに保存
+		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+			if email, ok := claims["email"].(string); ok {
+				c.Set("userEmail", email)
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+				c.Abort()
+				return
+			}
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
 func main() {
 	r := gin.Default()
 
 	// API ルート
 	r.POST("/register", register)
 	r.POST("/login", login)
-	r.GET("/todos", getTodos)
-	r.POST("/todos", createTodo)
-	r.PUT("/todos/:id", updateTodo)
-	r.DELETE("/todos/:id", deleteTodo)
-	r.GET("todos/overdue", getOverdueTodos)
-	r.GET("todos/has_due_date", getHasDueDateTodos)
+
+	// 認証が必要なルート
+	auth := r.Group("/")
+	auth.Use(AuthMiddleware())
+	{
+		auth.GET("/todos", getTodos)
+		auth.POST("/todos", createTodo)
+		auth.PUT("/todos/:id", updateTodo)
+		auth.DELETE("/todos/:id", deleteTodo)
+		auth.GET("todos/overdue", getOverdueTodos)
+		auth.GET("todos/has_due_date", getHasDueDateTodos)
+	}
+
 	r.Run(":8080") // サーバー起動
 }
