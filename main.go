@@ -2,9 +2,12 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -15,6 +18,12 @@ type Todo struct {
 	Title     string     `json:"title"`
 	Completed bool       `json:"completed"`
 	DueDate   *time.Time `json:"due_date" gorm:"default:null"`
+}
+
+type User struct {
+	ID       uint   `gorm:"primaryKey"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 // DB 変数
@@ -31,6 +40,7 @@ func init() {
 
 	// `todos` テーブルを作成
 	db.AutoMigrate(&Todo{})
+	db.AutoMigrate(&User{})
 }
 
 // TODO 一覧を取得
@@ -89,10 +99,70 @@ func deleteTodo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "TODO deleted"})
 }
 
+func register(c *gin.Context) {
+	var user User
+	if err := c.BindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error while hashing password"})
+		return
+	}
+	user.Password = string(hashedPassword)
+
+	if err := db.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error while registering user"})
+		return
+	}
+	c.JSON(http.StatusOK, user)
+}
+
+func login(c *gin.Context) {
+	var user User
+	if err := c.BindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var foundUser User
+	if err := db.Where("email = ?", user.Email).First(&foundUser).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error while logging in"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(foundUser.Password), []byte(user.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"email": user.Email,
+		"exp":   time.Now().Add(time.Hour * 24).Unix(),
+	})
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT Secret not found"})
+		return
+	}
+
+	tokenString, err := token.SignedString([]byte(jwtSecret))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error while generating token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": tokenString})
+}
+
 func main() {
 	r := gin.Default()
 
 	// API ルート
+	r.POST("/register", register)
+	r.POST("/login", login)
 	r.GET("/todos", getTodos)
 	r.POST("/todos", createTodo)
 	r.PUT("/todos/:id", updateTodo)
