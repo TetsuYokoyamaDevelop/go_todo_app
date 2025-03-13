@@ -26,7 +26,7 @@ type Todo struct {
 type User struct {
 	ID       uint   `gorm:"primaryKey"`
 	Email    string `json:"email"`
-	Password string `json:"password"`
+	Password string `json:"-"`
 }
 
 // DB 変数
@@ -46,22 +46,69 @@ func init() {
 	db.AutoMigrate(&User{})
 }
 
+func userEmail(c *gin.Context) (string, bool, string) {
+	userEmail, exists := c.Get("userEmail")
+	if !exists {
+		return "", false, "User not authenticated"
+	}
+	return userEmail.(string), true, ""
+}
+
 // TODO 一覧を取得
 func getTodos(c *gin.Context) {
 	var todos []Todo
-	db.Find(&todos)
+	// JWTトークンからユーザー情報を取得
+	email, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	db.Preload("User").Where("user_id = ?", user.ID).Find(&todos)
+
 	c.JSON(http.StatusOK, todos)
 }
 
 func getOverdueTodos(c *gin.Context) {
 	var todos []Todo
-	db.Where("due_date IS NOT NULL AND due_date < ?", time.Now()).Find(&todos)
+
+	email, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	db.Preload("User").Where("user_id = ? AND due_date IS NOT NULL AND due_date < ?", user.ID, time.Now()).Find(&todos)
 	c.JSON(http.StatusOK, todos)
 }
 
 func getHasDueDateTodos(c *gin.Context) {
 	var todos []Todo
-	db.Where("due_date IS NOT NULL").Find(&todos)
+	email, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User not found"})
+		return
+	}
+
+	db.Preload("User").Where("user_id = ? AND due_date IS NOT NULL", user.ID).Find(&todos)
 	c.JSON(http.StatusOK, todos)
 }
 
@@ -74,9 +121,9 @@ func createTodo(c *gin.Context) {
 	}
 
 	// JWTトークンからユーザー情報を取得
-	userEmail, exists := c.Get("userEmail")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+	userEmail, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
 		return
 	}
 
@@ -106,7 +153,12 @@ func createTodo(c *gin.Context) {
 // TODO を更新
 func updateTodo(c *gin.Context) {
 	var todo Todo
-	if err := db.First(&todo, c.Param("id")).Error; err != nil {
+	email, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
+	}
+	if err := db.Preload("User").Where("user_id = ?", email).First(&todo, c.Param("id")).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "TODO not found"})
 		return
 	}
@@ -121,7 +173,12 @@ func updateTodo(c *gin.Context) {
 // TODO を削除
 func deleteTodo(c *gin.Context) {
 	var todo Todo
-	if err := db.First(&todo, c.Param("id")).Error; err != nil {
+	email, ok, err := userEmail(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
+	}
+	if err := db.Preload("User").Where("user_id = ?", email).First(&todo, c.Param("id")).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "TODO not found"})
 		return
 	}
