@@ -70,7 +70,15 @@ func getTodos(c *gin.Context) {
 		return
 	}
 
-	db.Preload("User").Where("user_id = ?", user.ID).Find(&todos)
+	// クエリパラメータから検索キーワードを取得
+	search := c.Query("search")
+
+	// クエリパラメータを使用して検索
+	query := db.Preload("User").Where("user_id = ?", user.ID)
+	if search != "" {
+		query = query.Where("title LIKE ?", "%"+search+"%")
+	}
+	query.Order("due_date ASC").Find(&todos)
 
 	c.JSON(http.StatusOK, todos)
 }
